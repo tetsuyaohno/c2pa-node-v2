@@ -170,6 +170,20 @@ impl NeonBuilder {
 
         Ok(promise)
     }
+
+    pub fn add_redaction(mut cx: FunctionContext) -> JsResult<JsUndefined> {
+        let rt = runtime();
+        let this = cx.this::<JsBox<Self>>()?;
+        let uri = cx.argument::<JsString>(0)?.value(&mut cx);
+        let mut builder = rt.block_on(async { this.builder.lock().await });
+        builder
+            .definition
+            .redactions
+            .get_or_insert_with(Vec::new)
+            .push(uri);
+        Ok(cx.undefined())
+    }
+
     pub fn add_ingredient(mut cx: FunctionContext) -> JsResult<JsUndefined> {
         let rt = runtime();
         let this = cx.this::<JsBox<Self>>()?;

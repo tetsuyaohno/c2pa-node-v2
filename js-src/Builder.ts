@@ -259,6 +259,10 @@ export class Builder implements BuilderInterface {
     );
   }
 
+  addRedaction(uri: string): void {
+    getNeonBinary().builderAddRedaction.call(this.builder, uri);
+  }
+
   getHandle(): NeonBuilderHandle {
     return this.builder;
   }

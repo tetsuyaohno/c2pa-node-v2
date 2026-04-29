@@ -333,6 +333,12 @@ export interface BuilderInterface {
   updateManifestProperty(property: string, value: string | ClaimVersion): void;
 
   /**
+   * Add a JUMBF URI to the list of assertions to redact from ingredient manifests
+   * @param uri JUMBF URI of the assertion to redact (e.g. `self#jumbf=/c2pa/{label}/c2pa.assertions/{name}`)
+   */
+  addRedaction(uri: string): void;
+
+  /**
    * Get the internal handle for use with Neon bindings
    */
   getHandle(): NeonBuilderHandle;

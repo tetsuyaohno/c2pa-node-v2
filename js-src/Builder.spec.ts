@@ -678,6 +678,17 @@ describe("Builder", () => {
       }
     });
 
+    it("should add redactions via addRedaction method", () => {
+      const uri1 = "self#jumbf=/c2pa/test-label/c2pa.assertions/cawg.identity";
+      const uri2 =
+        "self#jumbf=/c2pa/test-label/c2pa.assertions/stds.schema-org.CreativeWork";
+      const builder = Builder.new();
+      builder.addRedaction(uri1);
+      builder.addRedaction(uri2);
+      const definition = builder.getManifestDefinition();
+      expect(definition.redactions).toEqual([uri1, uri2]);
+    });
+
     it("should test builder remote url", async () => {
       // This test mirrors the Rust test_builder_remote_url test
 
