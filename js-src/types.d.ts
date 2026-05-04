@@ -333,10 +333,13 @@ export interface BuilderInterface {
   updateManifestProperty(property: string, value: string | ClaimVersion): void;
 
   /**
-   * Add a JUMBF URI to the list of assertions to redact from ingredient manifests
+   * Redact an assertion from an ingredient manifest and record the reason.
+   * Adds the URI to `definition.redactions` and appends a `c2pa.redacted` action
+   * with `parameters.redacted` pointing to the same URI.
    * @param uri JUMBF URI of the assertion to redact (e.g. `self#jumbf=/c2pa/{label}/c2pa.assertions/{name}`)
+   * @param reason Why the assertion is being redacted. Use `"c2pa.PII.present"` for PII removal.
    */
-  addRedaction(uri: string): void;
+  addRedaction(uri: string, reason: string): void;
 
   /**
    * Get the internal handle for use with Neon bindings

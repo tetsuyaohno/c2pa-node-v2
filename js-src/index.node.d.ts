@@ -85,7 +85,7 @@ declare module "index.node" {
     property: string,
     value: string | ClaimVersion,
   ): void;
-  export function builderAddRedaction(uri: string): void;
+  export function builderAddRedaction(uri: string, reason: string): void;
 
   // Reader methods
   export function readerFromAsset(
