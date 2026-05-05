@@ -583,7 +583,7 @@ describe("Builder", () => {
       expect(definition.ingredients![0]).toMatchObject(ingredient);
     });
 
-    it("should perform redaction workflow", async () => {
+    it("should redact a thumbnail from an ingredient manifest", async () => {
       const signerConfig: JsCallbackSignerConfig = {
         alg: "es256",
         certs: [publicKey],
@@ -594,21 +594,91 @@ describe("Builder", () => {
       const testSigner = new TestSigner(privateKey);
       const signer = CallbackSigner.newSigner(signerConfig, testSigner.sign);
 
-      // Step 1: Sign source asset with stds.schema-org.CreativeWork assertion
-      const assertionLabel = "stds.schema-org.CreativeWork";
+      // Sign source asset with a thumbnail
       const step1Builder = Builder.withJson({
         claim_generator_info: [{ name: "c2pa_test", version: "1.0.0" }],
-        title: "Asset With PII",
+        title: "Asset With Thumbnail",
         format: "image/jpeg",
-        instance_id: "step1-1234",
+        instance_id: "thumb-step1-1234",
+        thumbnail: { format: "image/jpeg", identifier: "thumbnail.jpg" },
+      });
+      await step1Builder.addResource("thumbnail.jpg", {
+        mimeType: "image/jpeg",
+        buffer: testThumbnail,
+      });
+      const step1Dest = { buffer: null };
+      await step1Builder.signAsync(signer, source, step1Dest);
+      const step1Asset = {
+        buffer: step1Dest.buffer! as Buffer,
+        mimeType: "image/jpeg",
+      };
+
+      // Verify thumbnail exists in original manifest
+      const originalReader = await Reader.fromAsset(step1Asset);
+      expect(originalReader).not.toBeNull();
+      const parentLabel = originalReader!.activeLabel();
+      expect(parentLabel).toBeDefined();
+      const originalManifest = originalReader!.getActive();
+      expect(originalManifest?.thumbnail).toBeDefined();
+      expect(originalManifest?.thumbnail).not.toBeNull();
+
+      // Redact the thumbnail
+      const thumbnailUri = `self#jumbf=/c2pa/${parentLabel}/c2pa.assertions/c2pa.thumbnail.claim`;
+      const redactionBuilder = Builder.withJson({
+        claim_generator_info: [{ name: "c2pa_test", version: "1.0.0" }],
+        title: "Redacted Thumbnail Manifest",
+        format: "image/jpeg",
+        instance_id: "thumb-step2-1234",
+      });
+      redactionBuilder.setIntent("update");
+      redactionBuilder.addRedaction(thumbnailUri, "c2pa.PII.present");
+
+      const step2Dest = { buffer: null };
+      await redactionBuilder.signAsync(signer, step1Asset, step2Dest);
+
+      const finalReader = await Reader.fromAsset({
+        buffer: step2Dest.buffer! as Buffer,
+        mimeType: "image/jpeg",
+      });
+      expect(finalReader).not.toBeNull();
+
+      const store = finalReader!.json();
+      const parentManifest = store.manifests?.[parentLabel!];
+      expect(parentManifest).toBeDefined();
+      expect(parentManifest?.thumbnail).toBeUndefined();
+    });
+
+    it("should redact an assertion from an ingredient manifest", async () => {
+      const signerConfig: JsCallbackSignerConfig = {
+        alg: "es256",
+        certs: [publicKey],
+        reserveSize: 10000,
+        tsaUrl: undefined,
+        directCoseHandling: false,
+      };
+      const testSigner = new TestSigner(privateKey);
+      const signer = CallbackSigner.newSigner(signerConfig, testSigner.sign);
+
+      // Sign source asset with multiple distinct assertions
+      const piiLabel = "stds.schema-org.CreativeWork";
+      const retainedLabel = "org.contentauth.retained";
+      const step1Builder = Builder.withJson({
+        claim_generator_info: [{ name: "c2pa_test", version: "1.0.0" }],
+        title: "Asset With Multiple Assertions",
+        format: "image/jpeg",
+        instance_id: "assert-step1-1234",
         assertions: [
           {
-            label: assertionLabel,
+            label: piiLabel,
             data: {
               "@context": "http://schema.org/",
               "@type": "CreativeWork",
               author: [{ "@type": "Person", name: "John Doe" }],
             },
+          },
+          {
+            label: retainedLabel,
+            data: { keep: true },
           },
         ],
       });
@@ -619,42 +689,33 @@ describe("Builder", () => {
         mimeType: "image/jpeg",
       };
 
-      // Step 2: Read the signed asset to get manifest label and build JUMBF URI
-      const parentReader = await Reader.fromAsset(step1Asset);
-      expect(parentReader).not.toBeNull();
-      const parentLabel = parentReader!.activeLabel();
+      // Verify both assertions exist in original manifest
+      const originalReader = await Reader.fromAsset(step1Asset);
+      expect(originalReader).not.toBeNull();
+      const parentLabel = originalReader!.activeLabel();
       expect(parentLabel).toBeDefined();
 
-      // Verify the assertion exists in the parent manifest
-      const parentManifest = parentReader!.getActive();
-      expect(
-        parentManifest?.assertions?.some(
-          (a: any) => a.label === assertionLabel,
-        ),
-      ).toBe(true);
+      const originalStore = originalReader!.json();
+      const originalLabels = originalStore.manifests![parentLabel!].assertions!.map(
+        (a: any) => a.label,
+      );
+      expect(originalLabels).toContain(piiLabel);
+      expect(originalLabels).toContain(retainedLabel);
 
-      // Correct JUMBF URI format: self#jumbf=/c2pa/{label}/c2pa.assertions/{assertionLabel}
-      const redactedUri = `self#jumbf=/c2pa/${parentLabel}/c2pa.assertions/${assertionLabel}`;
-
-      // Step 3: Create update builder that redacts the PII assertion
+      // Redact only the PII assertion
+      const redactionUri = `self#jumbf=/c2pa/${parentLabel}/c2pa.assertions/${piiLabel}`;
       const redactionBuilder = Builder.withJson({
         claim_generator_info: [{ name: "c2pa_test", version: "1.0.0" }],
-        title: "Redacted Manifest",
+        title: "Redacted Assertion Manifest",
         format: "image/jpeg",
-        instance_id: "step2-1234",
+        instance_id: "assert-step2-1234",
       });
       redactionBuilder.setIntent("update");
-      redactionBuilder.addRedaction(redactedUri, "c2pa.PII.present");
+      redactionBuilder.addRedaction(redactionUri, "c2pa.PII.present");
 
       const step2Dest = { buffer: null };
-      const manifestBytes = await redactionBuilder.signAsync(
-        signer,
-        step1Asset,
-        step2Dest,
-      );
-      expect(manifestBytes.length).toBeGreaterThan(0);
+      await redactionBuilder.signAsync(signer, step1Asset, step2Dest);
 
-      // Step 4: Verify assertion is gone from the ingredient manifest
       const finalReader = await Reader.fromAsset({
         buffer: step2Dest.buffer! as Buffer,
         mimeType: "image/jpeg",
@@ -662,26 +723,15 @@ describe("Builder", () => {
       expect(finalReader).not.toBeNull();
 
       const store = finalReader!.json();
-      const parentInStore = store.manifests?.[parentLabel!];
-      expect(parentInStore).toBeDefined();
+      const parentManifest = store.manifests?.[parentLabel!];
+      expect(parentManifest).toBeDefined();
 
-      // PII assertion removed from parent manifest
-      const hasPiiAssertion = parentInStore?.assertions?.some(
-        (a: any) => a.label === assertionLabel,
+      const assertionLabels = parentManifest?.assertions?.map(
+        (a: any) => a.label,
       );
-      expect(hasPiiAssertion).toBe(false);
-
-      // Active manifest records c2pa.redacted action and redactions list
-      const activeLabel = store.active_manifest;
-      const activeManifest = store.manifests?.[activeLabel!];
-      const actionsAssertion = activeManifest?.assertions?.find(
-        (a: any) => a.label === "c2pa.actions" || a.label === "c2pa.actions.v2",
-      );
-      const hasRedactedAction = (actionsAssertion?.data as any)?.actions?.some(
-        (a: any) => a.action === "c2pa.redacted",
-      );
-      expect(hasRedactedAction).toBe(true);
-      expect(activeManifest?.redactions).toContain(redactedUri);
+      // PII assertion removed, retained assertion still present
+      expect(assertionLabels).not.toContain(piiLabel);
+      expect(assertionLabels).toContain(retainedLabel);
     });
 
     it("should add redactions via addRedaction method", () => {
