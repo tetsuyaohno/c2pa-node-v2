@@ -60,7 +60,9 @@ impl NeonBuilder {
                 .with_definition(json.as_str())
                 .or_else(|err| cx.throw_error(err.to_string()))?
         } else {
-            Builder::default().with_definition(&json).or_else(|err| cx.throw_error(err.to_string()))?
+            Builder::default()
+                .with_definition(&json)
+                .or_else(|err| cx.throw_error(err.to_string()))?
         };
 
         Ok(cx.boxed(Self {
@@ -73,7 +75,7 @@ impl NeonBuilder {
         let this = cx.this::<JsBox<Self>>()?;
         let intent_str = cx.argument::<JsString>(0)?.value(&mut cx);
         let intent: BuilderIntent = serde_json::from_str(&intent_str)
-            .or_else(|_| cx.throw_error(format!("Invalid intent: {}", intent_str)))?;
+            .or_else(|_| cx.throw_error(format!("Invalid intent: {intent_str}")))?;
         let mut builder = rt.block_on(async { this.builder.lock().await });
         builder.set_intent(intent);
         Ok(cx.undefined())
@@ -127,7 +129,7 @@ impl NeonBuilder {
             // For Json, expect the assertion as a string (JSON) and parse it
             let assertion_str = cx.argument::<JsString>(1)?.value(&mut cx);
             let assertion: serde_json::Value = serde_json::from_str(&assertion_str)
-                .or_else(|err| cx.throw_error(format!("Invalid JSON: {}", err)))?;
+                .or_else(|err| cx.throw_error(format!("Invalid JSON: {err}")))?;
             builder
                 .add_assertion(&label, &assertion)
                 .or_else(|err| cx.throw_error(err.to_string()))?;

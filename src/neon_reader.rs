@@ -130,7 +130,9 @@ impl NeonReader {
                         .with_manifest_data_and_stream_async(&c2pa_data, &format, stream)
                         .await?
                 } else {
-                    Reader::default().with_manifest_data_and_stream_async(&c2pa_data, &format, stream).await?
+                    Reader::default()
+                        .with_manifest_data_and_stream_async(&c2pa_data, &format, stream)
+                        .await?
                 };
 
                 Ok(reader)
