@@ -1,0 +1,5 @@
+{
+  "type": "pem",
+  "cert": "signer-cert.pem",
+  "key": "signer-key.pem"
+}

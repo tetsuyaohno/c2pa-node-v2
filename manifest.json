@@ -1,0 +1,17 @@
+{
+  "claim_generator": "SmartCamera/1.0",
+  "manifest_version": "1.3.0",
+  "assertions": [
+    {
+      "label": "c2pa.actions",
+      "data": {
+        "actions": [
+          {
+            "action": "c2pa.created",
+            "when": "2025-01-01T00:00:00Z"
+          }
+        ]
+      }
+    }
+  ]
+}
