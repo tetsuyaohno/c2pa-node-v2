@@ -15,9 +15,14 @@
 import { Buffer } from "buffer";
 import type {
   BuilderIntent,
+  C2paReason,
+  Ingredient,
   Manifest,
   ManifestStore,
 } from "@contentauth/c2pa-types";
+
+export type { C2paReason, Ingredient } from "@contentauth/c2pa-types";
+
 /**
  * Describes the digital signature algorithms allowed by the C2PA spec
  *
@@ -58,7 +63,7 @@ export type TrustmarkVariant =
   // Quality Trustmark model
   | "Q";
 
-type ManifestAssertionKind = "Cbor" | "Json" | "Binary" | "Uri";
+export type ManifestAssertionKind = "Cbor" | "Json" | "Binary" | "Uri";
 
 /**
  * A buffer for the source asset
@@ -102,6 +107,13 @@ export type SourceAsset = SourceBufferAsset | FileAsset;
 export type DestinationAsset = DestinationBufferAsset | FileAsset;
 
 /**
+ * The return type of resourceToAsset.
+ * When the asset is a file, returns the number of bytes written.
+ * When the asset is a buffer, returns an object with the buffer and bytes written.
+ */
+export type ResourceAsset = { buffer: Buffer; bytes_written: number };
+
+/**
  * A signer that uses a local certificate and private key to sign data
  */
 export interface LocalSignerInterface {
@@ -110,7 +122,7 @@ export interface LocalSignerInterface {
   certs(): Array<Buffer>;
   reserveSize(): number;
   timeAuthorityUrl(): string | undefined;
-  signer(): NeonLocalSignerHandle;
+  getHandle(): NeonLocalSignerHandle;
 }
 
 /**
@@ -123,14 +135,14 @@ export interface CallbackSignerInterface {
   reserveSize(): number;
   timeAuthorityUrl(): string | undefined;
   directCoseHandling(): boolean;
-  signer(): NeonCallbackSignerHandle;
+  getHandle(): NeonCallbackSignerHandle;
 }
 
 export interface CallbackCredentialHolderInterface {
   sigType(): string;
   reserveSize(): number;
   sign(payload: SignerPayload): Promise<Buffer>;
-  signer(): NeonCallbackCredentialHolderHandle;
+  getHandle(): NeonCallbackCredentialHolderHandle;
 }
 
 /**
@@ -174,6 +186,12 @@ export interface HashedUri {
   hash: Uint8Array;
   alg?: string;
 }
+
+/**
+ * Optional settings that can be provided when creating a Reader or Builder.
+ * Can be a JSON string, TOML string, or a settings object.
+ */
+export type C2paSettings = string | object;
 
 export interface BuilderInterface {
   /** An intent lets the API know what kind of manifest to create.
@@ -234,6 +252,12 @@ export interface BuilderInterface {
     ingredientJson: string,
     ingredient?: SourceAsset,
   ): Promise<void>;
+
+  /**
+   * Add an ingredient to the manifest from a Reader
+   * @param reader The Reader object of the ingredient
+   */
+  addIngredientFromReader(reader: ReaderInterface): Ingredient;
 
   /**
    * Convert the Builder into a archive formatted buffer or file
@@ -308,6 +332,20 @@ export interface BuilderInterface {
    * @returns The manifest definition
    */
   updateManifestProperty(property: string, value: string | ClaimVersion): void;
+
+  /**
+   * Redact an assertion from an ingredient manifest and record the reason.
+   * Adds the URI to `definition.redactions` and appends a `c2pa.redacted` action
+   * with `parameters.redacted` pointing to the same URI.
+   * @param uri JUMBF URI of the assertion to redact (e.g. `self#jumbf=/c2pa/{label}/c2pa.assertions/{name}`)
+   * @param reason Why the assertion is being redacted. Use `"c2pa.PII.present"` for PII removal.
+   */
+  addRedaction(uri: string, reason: C2paReason): void;
+
+  /**
+   * Get the internal handle for use with Neon bindings
+   */
+  getHandle(): NeonBuilderHandle;
 }
 
 export interface ReaderInterface {
@@ -329,9 +367,19 @@ export interface ReaderInterface {
   /**
    * Write a resource to a buffer or file
    * @param uri The URI of the resource
-   * @param filePath The path to the file
+   * @param output The destination asset (file or buffer)
+   * @returns When output is a file, returns the number of bytes written.
+   *          When output is a buffer, returns an object with the buffer and bytes written.
    */
-  resourceToAsset(uri: string, output: DestinationAsset): Promise<number>;
+  resourceToAsset(
+    uri: string,
+    output: DestinationAsset,
+  ): Promise<ResourceAsset>;
+
+  /**
+   * Get the internal handle for use with Neon bindings
+   */
+  getHandle(): NeonReaderHandle;
 }
 
 export interface IdentityAssertionSignerInterface {
@@ -345,7 +393,7 @@ export interface IdentityAssertionSignerInterface {
     identityAssertionBuilder: IdentityAssertionBuilderInterface,
   ): void;
 
-  signer(): NeonIdentityAssertionSignerHandle;
+  getHandle(): NeonIdentityAssertionSignerHandle;
 }
 
 export interface IdentityAssertionBuilderInterface {
@@ -415,19 +463,39 @@ export interface TrustConfig {
  */
 export interface VerifyConfig {
   /** Whether to verify after reading a manifest */
-  verifyAfterReading: boolean;
+  verifyAfterReading?: boolean;
   /** Whether to verify after signing a manifest */
-  verifyAfterSign: boolean;
+  verifyAfterSign?: boolean;
   /** Whether to verify trust during validation */
-  verifyTrust: boolean;
+  verifyTrust?: boolean;
   /** Whether to verify timestamp trust */
-  verifyTimestampTrust: boolean;
+  verifyTimestampTrust?: boolean;
   /** Whether to fetch OCSP responses */
-  ocspFetch: boolean;
+  ocspFetch?: boolean;
   /** Whether to fetch remote manifests */
-  remoteManifestFetch: boolean;
+  remoteManifestFetch?: boolean;
   /** Whether to skip ingredient conflict resolution */
-  skipIngredientConflictResolution: boolean;
+  skipIngredientConflictResolution?: boolean;
   /** Whether to use strict v1 validation */
-  strictV1Validation: boolean;
+  strictV1Validation?: boolean;
+}
+
+/**
+ * Settings configuration object that can be passed to Reader and Builder constructors.
+ * Only trust, verify, and builder settings are configurable from the Node SDK.
+ * Uses snake_case internally to match the c2pa-rs settings format.
+ */
+export interface SettingsContext {
+  /** C2PA trust configuration */
+  trust?: TrustConfig;
+  /** CAWG trust configuration */
+  cawgTrust?: TrustConfig;
+  /** Verification configuration */
+  verify?: VerifyConfig;
+  /** Builder configuration */
+  builder?: {
+    thumbnail?: {
+      enabled?: boolean;
+    };
+  };
 }

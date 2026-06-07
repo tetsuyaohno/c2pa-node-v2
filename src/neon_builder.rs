@@ -14,31 +14,18 @@
 use crate::asset::parse_asset;
 use crate::error::{as_js_error, Error};
 use crate::neon_identity_assertion_signer::NeonIdentityAssertionSigner;
+use crate::neon_reader::NeonReader;
 use crate::neon_signer::{CallbackSignerConfig, NeonCallbackSigner, NeonLocalSigner};
 use crate::runtime::runtime;
-use c2pa::{Builder, BuilderIntent, Ingredient};
+use crate::utils::parse_settings;
+use c2pa::{assertions::Action, Builder, BuilderIntent, Ingredient};
+use neon::context::Context as NeonContext;
 use neon::prelude::*;
 use neon_serde4;
-use serde::{Deserialize, Serialize};
 use serde_json;
 use std::ops::Deref;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-
-#[derive(Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct IngredientThumbnail {
-    pub format: String,
-    #[serde(with = "serde_bytes")]
-    pub data: Vec<u8>,
-}
-
-#[derive(Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct IngredientOptions {
-    pub is_parent: bool,
-    pub thumbnail: Option<IngredientThumbnail>,
-}
 
 pub struct NeonBuilder {
     builder: Arc<Mutex<Builder>>,
@@ -46,14 +33,38 @@ pub struct NeonBuilder {
 
 impl NeonBuilder {
     pub fn new(mut cx: FunctionContext) -> JsResult<JsBox<Self>> {
+        // Parse optional settings parameter (argument 0)
+        let context_opt =
+            parse_settings(&mut cx, 0, "Builder").or_else(|err| cx.throw_error(err.to_string()))?;
+
+        let builder = if let Some(context) = context_opt {
+            Builder::from_context(context)
+        } else {
+            Builder::default()
+        };
+
         Ok(cx.boxed(Self {
-            builder: Arc::new(Mutex::new(Builder::default())),
+            builder: Arc::new(Mutex::new(builder)),
         }))
     }
 
     pub fn with_json(mut cx: FunctionContext) -> JsResult<JsBox<Self>> {
         let json = cx.argument::<JsString>(0)?.value(&mut cx);
-        let builder = Builder::from_json(&json).or_else(|err| cx.throw_error(err.to_string()))?;
+
+        // Parse optional settings parameter (argument 1)
+        let context_opt =
+            parse_settings(&mut cx, 1, "Builder").or_else(|err| cx.throw_error(err.to_string()))?;
+
+        let builder = if let Some(context) = context_opt {
+            Builder::from_context(context)
+                .with_definition(json.as_str())
+                .or_else(|err| cx.throw_error(err.to_string()))?
+        } else {
+            Builder::default()
+                .with_definition(&json)
+                .or_else(|err| cx.throw_error(err.to_string()))?
+        };
+
         Ok(cx.boxed(Self {
             builder: Arc::new(Mutex::new(builder)),
         }))
@@ -64,7 +75,7 @@ impl NeonBuilder {
         let this = cx.this::<JsBox<Self>>()?;
         let intent_str = cx.argument::<JsString>(0)?.value(&mut cx);
         let intent: BuilderIntent = serde_json::from_str(&intent_str)
-            .or_else(|_| cx.throw_error(format!("Invalid intent: {}", intent_str)))?;
+            .or_else(|_| cx.throw_error(format!("Invalid intent: {intent_str}")))?;
         let mut builder = rt.block_on(async { this.builder.lock().await });
         builder.set_intent(intent);
         Ok(cx.undefined())
@@ -92,8 +103,8 @@ impl NeonBuilder {
         let rt = runtime();
         let this = cx.this::<JsBox<Self>>()?;
         let action_json = cx.argument::<JsString>(0)?.value(&mut cx);
-        let action: c2pa::assertions::Action = serde_json::from_str(&action_json)
-            .or_else(|err| cx.throw_error(err.to_string()))?;
+        let action: c2pa::assertions::Action =
+            serde_json::from_str(&action_json).or_else(|err| cx.throw_error(err.to_string()))?;
         let mut builder = rt.block_on(async { this.builder.lock().await });
         builder
             .add_action(action)
@@ -118,7 +129,7 @@ impl NeonBuilder {
             // For Json, expect the assertion as a string (JSON) and parse it
             let assertion_str = cx.argument::<JsString>(1)?.value(&mut cx);
             let assertion: serde_json::Value = serde_json::from_str(&assertion_str)
-                .or_else(|err| cx.throw_error(format!("Invalid JSON: {}", err)))?;
+                .or_else(|err| cx.throw_error(format!("Invalid JSON: {err}")))?;
             builder
                 .add_assertion(&label, &assertion)
                 .or_else(|err| cx.throw_error(err.to_string()))?;
@@ -161,6 +172,28 @@ impl NeonBuilder {
 
         Ok(promise)
     }
+
+    pub fn add_redaction(mut cx: FunctionContext) -> JsResult<JsUndefined> {
+        let rt = runtime();
+        let this = cx.this::<JsBox<Self>>()?;
+        let uri = cx.argument::<JsString>(0)?.value(&mut cx);
+        let reason = cx.argument::<JsString>(1)?.value(&mut cx);
+        let mut builder = rt.block_on(async { this.builder.lock().await });
+        builder
+            .definition
+            .redactions
+            .get_or_insert_with(Vec::new)
+            .push(uri.clone());
+        let action = Action::new("c2pa.redacted")
+            .set_reason(reason)
+            .set_parameter("redacted".to_owned(), uri)
+            .or_else(|err| cx.throw_error(err.to_string()))?;
+        builder
+            .add_action(action)
+            .or_else(|err| cx.throw_error(err.to_string()))?;
+        Ok(cx.undefined())
+    }
+
     pub fn add_ingredient(mut cx: FunctionContext) -> JsResult<JsUndefined> {
         let rt = runtime();
         let this = cx.this::<JsBox<Self>>()?;
@@ -217,27 +250,64 @@ impl NeonBuilder {
         Ok(promise)
     }
 
+    pub fn add_ingredient_from_reader(mut cx: FunctionContext) -> JsResult<JsString> {
+        let rt = runtime();
+        let this = cx.this::<JsBox<Self>>()?;
+        let reader = cx.argument::<JsBox<NeonReader>>(0)?.reader();
+
+        let mut builder = rt.block_on(async { this.builder.lock().await });
+        let reader = rt.block_on(async { reader.lock().await });
+        let ingredient = builder
+            .add_ingredient_from_reader(&reader)
+            .or_else(|err| cx.throw_error(err.to_string()))?;
+        let json =
+            serde_json::to_string(&ingredient).or_else(|err| cx.throw_error(err.to_string()))?;
+        Ok(cx.string(json))
+    }
+
     pub fn to_archive(mut cx: FunctionContext) -> JsResult<JsPromise> {
         let this = cx.this::<JsBox<Self>>()?;
-        let dest = cx
-            .argument::<JsObject>(0)
-            .and_then(|obj| parse_asset(&mut cx, obj))?;
+        let dest_obj = cx.argument::<JsObject>(0)?;
+        let dest = parse_asset(&mut cx, dest_obj)?;
+        let is_buffer = dest.name() == "destination_buffer";
         let builder = Arc::clone(&this.builder);
+        let dest_obj_root: Arc<Root<JsObject>> = Arc::new(Root::new(&mut cx, &dest_obj));
 
         let promise = cx
             .task(move || {
                 // Block on acquiring the async mutex lock
+                // Settings are automatically applied when runtime() is called
                 let rt = runtime();
-                let mut builder = rt.block_on(async { builder.lock().await });
+                let builder = rt.block_on(async { builder.lock().await });
 
-                dest.write_stream().and_then(|dest_stream| {
-                    builder.to_archive(dest_stream)?;
-                    Ok(())
+                dest.write_stream().and_then(|mut dest_stream| {
+                    builder.to_archive(&mut dest_stream)?;
+                    if is_buffer {
+                        let mut archive_data = Vec::new();
+                        dest_stream
+                            .rewind()
+                            .map_err(|e| Error::Asset(format!("Failed to rewind stream: {e}")))?;
+                        dest_stream
+                            .read_to_end(&mut archive_data)
+                            .map_err(|e| Error::Asset(format!("Failed to read stream: {e}")))?;
+                        Ok(Some(archive_data))
+                    } else {
+                        Ok(None)
+                    }
                 })
             })
-            .promise(move |mut cx, result: Result<(), Error>| match result {
-                Ok(_) => Ok(cx.undefined()),
-                Err(err) => as_js_error(&mut cx, err).and_then(|err| cx.throw(err)),
+            .promise(move |mut cx, result: Result<Option<Vec<u8>>, Error>| {
+                match result {
+                    Ok(Some(archive_data)) => {
+                        // If the output is a buffer, populate it with the archive data
+                        let buffer = JsBuffer::from_slice(&mut cx, &archive_data)?;
+                        let dest_obj = dest_obj_root.to_inner(&mut cx);
+                        dest_obj.set(&mut cx, "buffer", buffer)?;
+                        Ok(cx.undefined())
+                    }
+                    Ok(None) => Ok(cx.undefined()),
+                    Err(err) => as_js_error(&mut cx, err).and_then(|err| cx.throw(err)),
+                }
             });
         Ok(promise)
     }
@@ -247,18 +317,27 @@ impl NeonBuilder {
             .argument::<JsObject>(0)
             .and_then(|obj| parse_asset(&mut cx, obj))?;
 
+        let context_opt =
+            parse_settings(&mut cx, 1, "Builder").or_else(|err| cx.throw_error(err.to_string()))?;
+
         let promise = cx
             .task(move || {
                 let source_stream = source.into_read_stream()?;
-                let builder = Builder::from_archive(source_stream)?;
+                let builder = if let Some(context) = context_opt {
+                    Builder::from_context(context).with_archive(source_stream)?
+                } else {
+                    Builder::default().with_archive(source_stream)?
+                };
                 Ok(builder)
             })
-            .promise(move |mut cx, result: Result<Builder, Error>| match result {
-                Ok(builder) => Ok(cx.boxed(Self {
-                    builder: Arc::new(Mutex::new(builder)),
-                })),
-                Err(err) => as_js_error(&mut cx, err).and_then(|err| cx.throw(err)),
-            });
+            .promise(
+                move |mut cx, result: crate::error::Result<Builder>| match result {
+                    Ok(builder) => Ok(cx.boxed(Self {
+                        builder: Arc::new(Mutex::new(builder)),
+                    })),
+                    Err(err) => as_js_error(&mut cx, err).and_then(|err| cx.throw(err)),
+                },
+            );
         Ok(promise)
     }
 

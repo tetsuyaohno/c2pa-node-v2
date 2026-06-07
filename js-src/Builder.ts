@@ -11,11 +11,17 @@
 // specific language governing permissions and limitations under
 // each license.
 
-import type { BuilderIntent, Manifest } from "@contentauth/c2pa-types";
+import type {
+  BuilderIntent,
+  C2paReason,
+  Ingredient,
+  Manifest,
+} from "@contentauth/c2pa-types";
 
 import { getNeonBinary } from "./binary.js";
 import type {
   BuilderInterface,
+  C2paSettings,
   CallbackSignerInterface,
   ClaimVersion,
   DestinationAsset,
@@ -24,20 +30,26 @@ import type {
   JsCallbackSignerConfig,
   LocalSignerInterface,
   ManifestAssertionKind,
+  ReaderInterface,
   SourceAsset,
   NeonBuilderHandle,
 } from "./types.d.ts";
 import { IdentityAssertionSigner } from "./IdentityAssertion.js";
 
 export class Builder implements BuilderInterface {
-  private constructor(private builder: NeonBuilderHandle) {}
+  constructor(private builder: NeonBuilderHandle) {}
 
-  static new(): Builder {
-    const builder: NeonBuilderHandle = getNeonBinary().builderNew();
+  static new(settings?: C2paSettings): Builder {
+    const settingsStr = settings
+      ? typeof settings === "string"
+        ? settings
+        : JSON.stringify(settings)
+      : undefined;
+    const builder: NeonBuilderHandle = getNeonBinary().builderNew(settingsStr);
     return new Builder(builder);
   }
 
-  static withJson(json: Manifest): Builder {
+  static withJson(json: Manifest, settings?: C2paSettings): Builder {
     let jsonString: string;
     try {
       jsonString = JSON.stringify(json);
@@ -52,8 +64,15 @@ export class Builder implements BuilderInterface {
         "Failed to stringify JSON Manifest Definition: Unknown error",
       );
     }
-    const builder: NeonBuilderHandle =
-      getNeonBinary().builderWithJson(jsonString);
+    const settingsStr = settings
+      ? typeof settings === "string"
+        ? settings
+        : JSON.stringify(settings)
+      : undefined;
+    const builder: NeonBuilderHandle = getNeonBinary().builderWithJson(
+      jsonString,
+      settingsStr,
+    );
     return new Builder(builder);
   }
 
@@ -109,12 +128,31 @@ export class Builder implements BuilderInterface {
     }
   }
 
+  addIngredientFromReader(reader: ReaderInterface): Ingredient {
+    const readerHandle = reader.getHandle();
+    const result = getNeonBinary().builderAddIngredientFromReader.call(
+      this.builder,
+      readerHandle,
+    );
+    return JSON.parse(result);
+  }
+
   async toArchive(asset: DestinationAsset): Promise<void> {
     return getNeonBinary().builderToArchive.call(this.builder, asset);
   }
 
-  static async fromArchive(asset: SourceAsset): Promise<Builder> {
-    return new Builder(await getNeonBinary().builderFromArchive(asset));
+  static async fromArchive(
+    asset: SourceAsset,
+    settings?: C2paSettings,
+  ): Promise<Builder> {
+    const settingsStr = settings
+      ? typeof settings === "string"
+        ? settings
+        : JSON.stringify(settings)
+      : undefined;
+    return new Builder(
+      await getNeonBinary().builderFromArchive(asset, settingsStr),
+    );
   }
 
   sign(
@@ -124,7 +162,7 @@ export class Builder implements BuilderInterface {
   ): Buffer {
     return getNeonBinary().builderSign.call(
       this.builder,
-      signer.signer(),
+      signer.getHandle(),
       input,
       output,
     );
@@ -138,7 +176,7 @@ export class Builder implements BuilderInterface {
     const input: FileAsset = { path: filePath };
     return getNeonBinary().builderSign.call(
       this.builder,
-      signer.signer(),
+      signer.getHandle(),
       input,
       output,
     );
@@ -182,7 +220,7 @@ export class Builder implements BuilderInterface {
     input: SourceAsset,
     output: DestinationAsset,
   ): Promise<Buffer> {
-    const neonHandle = signer.signer();
+    const neonHandle = signer.getHandle();
     const isIdentity = signer instanceof IdentityAssertionSigner;
     const neonFn = isIdentity
       ? getNeonBinary().builderIdentitySignAsync
@@ -220,5 +258,13 @@ export class Builder implements BuilderInterface {
       property,
       value,
     );
+  }
+
+  addRedaction(uri: string, reason: C2paReason): void {
+    getNeonBinary().builderAddRedaction.call(this.builder, uri, reason);
+  }
+
+  getHandle(): NeonBuilderHandle {
+    return this.builder;
   }
 }

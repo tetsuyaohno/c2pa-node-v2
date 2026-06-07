@@ -15,14 +15,16 @@ import type { Manifest, ManifestStore } from "@contentauth/c2pa-types";
 
 import { getNeonBinary } from "./binary.js";
 import type {
+  C2paSettings,
   DestinationAsset,
   ReaderInterface,
+  ResourceAsset,
   SourceAsset,
   NeonReaderHandle,
 } from "./types.d.ts";
 
 export class Reader implements ReaderInterface {
-  constructor(private reader: NeonReaderHandle) {}
+  constructor(private reader: NeonReaderHandle) { }
 
   json(): ManifestStore {
     return JSON.parse(getNeonBinary().readerJson.call(this.reader));
@@ -36,22 +38,25 @@ export class Reader implements ReaderInterface {
     return getNeonBinary().readerIsEmbedded.call(this.reader);
   }
 
-  async resourceToAsset(uri: string, asset: DestinationAsset): Promise<number> {
+  async resourceToAsset(uri: string, asset: DestinationAsset): Promise<ResourceAsset> {
     return getNeonBinary().readerResourceToAsset.call(this.reader, uri, asset);
   }
 
-  static async fromAsset(asset: SourceAsset): Promise<Reader | null> {
+  static async fromAsset(asset: SourceAsset, settings?: C2paSettings): Promise<Reader | null> {
+    const settingsStr = settings ? (typeof settings === 'string' ? settings : JSON.stringify(settings)) : undefined;
     const reader: NeonReaderHandle | null =
-      await getNeonBinary().readerFromAsset(asset);
+      await getNeonBinary().readerFromAsset(asset, settingsStr);
     return reader ? new Reader(reader) : null;
   }
 
   static async fromManifestDataAndAsset(
     manifestData: Buffer,
     asset: SourceAsset,
+    settings?: C2paSettings,
   ): Promise<Reader> {
+    const settingsStr = settings ? (typeof settings === 'string' ? settings : JSON.stringify(settings)) : undefined;
     const reader: NeonReaderHandle =
-      await getNeonBinary().readerFromManifestDataAndAsset(manifestData, asset);
+      await getNeonBinary().readerFromManifestDataAndAsset(manifestData, asset, settingsStr);
     return new Reader(reader);
   }
 
@@ -70,6 +75,10 @@ export class Reader implements ReaderInterface {
       return undefined;
     }
 
-    return manifestStore.manifests[activeManifest];
+    return manifestStore.manifests?.[activeManifest];
+  }
+
+  getHandle(): NeonReaderHandle {
+    return this.reader;
   }
 }

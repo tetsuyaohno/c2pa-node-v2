@@ -20,6 +20,7 @@ import * as crypto from "crypto";
 
 import type {
   BuilderInterface,
+  C2paSettings,
   JsCallbackSignerConfig,
   DestinationBufferAsset,
   SourceBufferAsset,
@@ -277,6 +278,75 @@ describe("Builder", () => {
       expect(activeManifest?.title).toBe("Test_Manifest");
     });
 
+    it("should populate buffer when archiving to buffer", async () => {
+      const archive: DestinationBufferAsset = {
+        buffer: null,
+      };
+      await builder.toArchive(archive);
+      expect(archive.buffer).not.toBeNull();
+      expect(archive.buffer!.length).toBeGreaterThan(0);
+    });
+
+    it("should write archive to file", async () => {
+      const archivePath = path.join(tempDir, "archive_file_test.zip");
+      const archive = { path: archivePath };
+      await builder.toArchive(archive);
+
+      // Verify file was created and has content
+      expect(await fs.pathExists(archivePath)).toBe(true);
+      const stats = await fs.stat(archivePath);
+      expect(stats.size).toBeGreaterThan(0);
+    });
+
+    it("should construct reader directly from builder archive buffer", async () => {
+      const settings: C2paSettings = JSON.stringify({
+        builder: {
+          generate_c2pa_archive: true,
+        },
+        verify: {
+          verify_after_reading: false,
+        },
+      });
+      // Create a builder
+      const simpleManifestDefinition = {
+        claim_generator_info: [
+          {
+            name: "c2pa_test",
+            version: "1.0.0",
+          },
+        ],
+        title: "Test_Manifest",
+        format: "image/jpeg",
+        assertions: [],
+        resources: { resources: {} },
+      };
+
+      const testBuilder = Builder.withJson(simpleManifestDefinition, settings);
+
+      // Add an ingredient
+      await testBuilder.addIngredient(parent_json, source);
+
+      // Create an archive from the builder written to a buffer
+      const archive: DestinationBufferAsset = {
+        buffer: null,
+      };
+      await testBuilder.toArchive(archive);
+
+      // Verify buffer was populated
+      expect(archive.buffer).not.toBeNull();
+      expect(archive.buffer!.length).toBeGreaterThan(0);
+
+      // Construct a reader from the builder archive with mime-type "application/c2pa"
+      const reader = await Reader.fromAsset(
+        {
+          buffer: archive.buffer! as Buffer,
+          mimeType: "application/c2pa",
+        },
+        settings,
+      );
+      expect(reader).not.toBeNull();
+    });
+
     it("should sign data with callback to file", async () => {
       const dest: FileAsset = {
         path: path.join(tempDir, "callback_signed.jpg"),
@@ -400,7 +470,7 @@ describe("Builder", () => {
       const manifest = reader!.json();
 
       // Check that our specific JSON assertion doesn't have escaped characters
-      const activeManifest = manifest.manifests[manifest.active_manifest!];
+      const activeManifest = manifest.manifests![manifest.active_manifest!];
       const fingerprintAssertionData = activeManifest?.assertions?.find(
         (a: any) => a.label === "org.contentauth.fingerprint",
       );
@@ -488,57 +558,32 @@ describe("Builder", () => {
       expect(JSON.stringify(manifestStore)).toContain("thumbnail.ingredient");
     });
 
-    it("should perform redaction workflow like test_redaction_async", async () => {
-      // This test mirrors the Rust test_redaction_async test
-
-      // Create a reader to get the parent manifest label from the existing source
-      const reader = await Reader.fromAsset(source);
-      expect(reader).not.toBeNull();
-      const parentManifestLabel = reader!.activeLabel();
-      expect(parentManifestLabel).toBeDefined();
-
-      // Create a redacted URI for the assertion we are going to redact
-      // Using a common assertion label that might exist
-      const assertionLabel = "stds.schema-org.CreativeWork";
-      const redactedUri = `contentauth:urn:uuid:${parentManifestLabel}/c2pa.assertions/${assertionLabel}`;
-
-      // Create a builder with edit intent and redactions
-      const redactionManifestDefinition = {
-        claim_generator: "test-generator",
-        claim_generator_info: [
-          {
-            name: "c2pa_test",
-            version: "1.0.0",
-          },
-        ],
-        title: "Test_Redaction_Manifest",
+    it("should add ingredient with custom metadata", async () => {
+      const builder = Builder.new();
+      const ingredient = {
+        title: "Test Ingredient",
         format: "image/jpeg",
-        instance_id: "1234",
-        intent: "edit",
-        redactions: [redactedUri],
-        assertions: [
-          {
-            label: "org.test.assertion",
-            data: {},
+        instance_id: "ingredient-12345",
+        relationship: "componentOf",
+        metadata: {
+          customString: "my custom value",
+          customNumber: 42,
+          customBool: true,
+          customObject: {
+            nested: "value",
+            count: 123,
           },
-        ],
-        resources: { resources: {} },
+          customArray: ["item1", "item2", "item3"],
+        },
       };
+      await builder.addIngredient(JSON.stringify(ingredient));
 
-      const builder = Builder.withJson(redactionManifestDefinition);
+      const definition = builder.getManifestDefinition();
+      expect(definition.ingredients).toHaveLength(1);
+      expect(definition.ingredients![0]).toMatchObject(ingredient);
+    });
 
-      // Add a redacted action
-      const redactedAction = {
-        actions: [
-          {
-            action: "c2pa.redacted",
-          },
-        ],
-      };
-
-      builder.addAssertion("c2pa.actions", redactedAction, "Cbor");
-
-      // Use the callback signer like the other test
+    it("should redact a thumbnail from an ingredient manifest", async () => {
       const signerConfig: JsCallbackSignerConfig = {
         alg: "es256",
         certs: [publicKey],
@@ -549,38 +594,155 @@ describe("Builder", () => {
       const testSigner = new TestSigner(privateKey);
       const signer = CallbackSigner.newSigner(signerConfig, testSigner.sign);
 
-      // Sign the manifest with the original image as input
-      const dest = { buffer: null };
-      const outputBuffer = await builder.signAsync(signer, source, dest);
-      expect(outputBuffer.length).toBeGreaterThan(0);
+      // Sign source asset with a thumbnail
+      const step1Builder = Builder.withJson({
+        claim_generator_info: [{ name: "c2pa_test", version: "1.0.0" }],
+        title: "Asset With Thumbnail",
+        format: "image/jpeg",
+        instance_id: "thumb-step1-1234",
+        thumbnail: { format: "image/jpeg", identifier: "thumbnail.jpg" },
+      });
+      await step1Builder.addResource("thumbnail.jpg", {
+        mimeType: "image/jpeg",
+        buffer: testThumbnail,
+      });
+      const step1Dest = { buffer: null };
+      await step1Builder.signAsync(signer, source, step1Dest);
+      const step1Asset = {
+        buffer: step1Dest.buffer! as Buffer,
+        mimeType: "image/jpeg",
+      };
 
-      // Verify the result by reading the signed manifest
-      const signedReader = await Reader.fromAsset({
-        buffer: dest.buffer! as Buffer,
+      // Verify thumbnail exists in original manifest
+      const originalReader = await Reader.fromAsset(step1Asset);
+      expect(originalReader).not.toBeNull();
+      const parentLabel = originalReader!.activeLabel();
+      expect(parentLabel).toBeDefined();
+      const originalManifest = originalReader!.getActive();
+      expect(originalManifest?.thumbnail).toBeDefined();
+      expect(originalManifest?.thumbnail).not.toBeNull();
+
+      // Redact the thumbnail
+      const thumbnailUri = `self#jumbf=/c2pa/${parentLabel}/c2pa.assertions/c2pa.thumbnail.claim`;
+      const redactionBuilder = Builder.withJson({
+        claim_generator_info: [{ name: "c2pa_test", version: "1.0.0" }],
+        title: "Redacted Thumbnail Manifest",
+        format: "image/jpeg",
+        instance_id: "thumb-step2-1234",
+      });
+      redactionBuilder.setIntent("update");
+      redactionBuilder.addRedaction(thumbnailUri, "c2pa.PII.present");
+
+      const step2Dest = { buffer: null };
+      await redactionBuilder.signAsync(signer, step1Asset, step2Dest);
+
+      const finalReader = await Reader.fromAsset({
+        buffer: step2Dest.buffer! as Buffer,
         mimeType: "image/jpeg",
       });
-      expect(signedReader).not.toBeNull();
-      expect(signedReader).toBeDefined();
+      expect(finalReader).not.toBeNull();
 
-      // Check that the manifest was created successfully
-      const activeManifest = signedReader!.getActive();
-      expect(activeManifest).toBeDefined();
+      const store = finalReader!.json();
+      const parentManifest = store.manifests?.[parentLabel!];
+      expect(parentManifest).toBeDefined();
+      expect(parentManifest?.thumbnail).toBeUndefined();
+    });
 
-      // Verify the redacted action was added
-      const assertions = activeManifest?.assertions;
-      const actionsAssertion = assertions?.find(
-        (a: any) => a.label === "c2pa.actions.v2",
+    it("should redact an assertion from an ingredient manifest", async () => {
+      const signerConfig: JsCallbackSignerConfig = {
+        alg: "es256",
+        certs: [publicKey],
+        reserveSize: 10000,
+        tsaUrl: undefined,
+        directCoseHandling: false,
+      };
+      const testSigner = new TestSigner(privateKey);
+      const signer = CallbackSigner.newSigner(signerConfig, testSigner.sign);
+
+      // Sign source asset with multiple distinct assertions
+      const piiLabel = "stds.schema-org.CreativeWork";
+      const retainedLabel = "org.contentauth.retained";
+      const step1Builder = Builder.withJson({
+        claim_generator_info: [{ name: "c2pa_test", version: "1.0.0" }],
+        title: "Asset With Multiple Assertions",
+        format: "image/jpeg",
+        instance_id: "assert-step1-1234",
+        assertions: [
+          {
+            label: piiLabel,
+            data: {
+              "@context": "http://schema.org/",
+              "@type": "CreativeWork",
+              author: [{ "@type": "Person", name: "John Doe" }],
+            },
+          },
+          {
+            label: retainedLabel,
+            data: { keep: true },
+          },
+        ],
+      });
+      const step1Dest = { buffer: null };
+      await step1Builder.signAsync(signer, source, step1Dest);
+      const step1Asset = {
+        buffer: step1Dest.buffer! as Buffer,
+        mimeType: "image/jpeg",
+      };
+
+      // Verify both assertions exist in original manifest
+      const originalReader = await Reader.fromAsset(step1Asset);
+      expect(originalReader).not.toBeNull();
+      const parentLabel = originalReader!.activeLabel();
+      expect(parentLabel).toBeDefined();
+
+      const originalStore = originalReader!.json();
+      const originalLabels = originalStore.manifests![parentLabel!].assertions!.map(
+        (a: any) => a.label,
       );
-      expect(actionsAssertion).toBeDefined();
+      expect(originalLabels).toContain(piiLabel);
+      expect(originalLabels).toContain(retainedLabel);
 
-      if (actionsAssertion && isActionsAssertion(actionsAssertion)) {
-        const actions = actionsAssertion.data.actions;
-        const redactedAction = actions.find(
-          (a: any) => a.action === "c2pa.redacted",
-        );
-        expect(redactedAction).toBeDefined();
-        expect(redactedAction?.action).toBe("c2pa.redacted");
-      }
+      // Redact only the PII assertion
+      const redactionUri = `self#jumbf=/c2pa/${parentLabel}/c2pa.assertions/${piiLabel}`;
+      const redactionBuilder = Builder.withJson({
+        claim_generator_info: [{ name: "c2pa_test", version: "1.0.0" }],
+        title: "Redacted Assertion Manifest",
+        format: "image/jpeg",
+        instance_id: "assert-step2-1234",
+      });
+      redactionBuilder.setIntent("update");
+      redactionBuilder.addRedaction(redactionUri, "c2pa.PII.present");
+
+      const step2Dest = { buffer: null };
+      await redactionBuilder.signAsync(signer, step1Asset, step2Dest);
+
+      const finalReader = await Reader.fromAsset({
+        buffer: step2Dest.buffer! as Buffer,
+        mimeType: "image/jpeg",
+      });
+      expect(finalReader).not.toBeNull();
+
+      const store = finalReader!.json();
+      const parentManifest = store.manifests?.[parentLabel!];
+      expect(parentManifest).toBeDefined();
+
+      const assertionLabels = parentManifest?.assertions?.map(
+        (a: any) => a.label,
+      );
+      // PII assertion removed, retained assertion still present
+      expect(assertionLabels).not.toContain(piiLabel);
+      expect(assertionLabels).toContain(retainedLabel);
+    });
+
+    it("should add redactions via addRedaction method", () => {
+      const uri1 = "self#jumbf=/c2pa/test-label/c2pa.assertions/cawg.identity";
+      const uri2 =
+        "self#jumbf=/c2pa/test-label/c2pa.assertions/stds.schema-org.CreativeWork";
+      const builder = Builder.new();
+      builder.addRedaction(uri1, "c2pa.PII.present");
+      builder.addRedaction(uri2, "c2pa.PII.present");
+      const definition = builder.getManifestDefinition();
+      expect(definition.redactions).toEqual([uri1, uri2]);
     });
 
     it("should test builder remote url", async () => {
@@ -696,11 +858,15 @@ describe("Builder", () => {
       expect(actionsAssertion).toBeDefined();
       if (isActionsAssertion(actionsAssertion)) {
         const actions = actionsAssertion.data.actions;
-        const editedAction = actions.find((a: any) => a.action === "c2pa.edited");
+        const editedAction = actions.find(
+          (a: any) => a.action === "c2pa.edited",
+        );
         expect(editedAction).toBeDefined();
         expect(editedAction?.action).toBe("c2pa.edited");
       } else {
-        throw new Error("Actions assertion does not have the expected structure");
+        throw new Error(
+          "Actions assertion does not have the expected structure",
+        );
       }
     });
 
@@ -759,6 +925,49 @@ describe("Builder", () => {
       expect(addedIngredient).toBeDefined();
       expect(addedIngredient?.instance_id).toBe("ingredient-12345");
       expect(addedIngredient?.relationship).toBe("componentOf");
+    });
+
+    it("should add ingredient from reader", async () => {
+      const builder1 = Builder.new();
+      builder1.setIntent("edit" as any);
+      const signer = LocalSigner.newSigner(publicKey, privateKey, "es256");
+      const dest1: DestinationBufferAsset = {
+        buffer: null,
+      };
+      builder1.sign(signer, source, dest1);
+
+      // Read the signed file back with Reader
+      const reader = await Reader.fromAsset({
+        buffer: dest1.buffer! as Buffer,
+        mimeType: "image/jpeg",
+      });
+      expect(reader).not.toBeNull();
+
+      // Create a new builder and add ingredient from the reader
+      const builder2 = Builder.new();
+      const ingredient = builder2.addIngredientFromReader(reader!);
+      expect(ingredient).toBeDefined();
+
+      // Verify the ingredient was added to the builder
+      const definition = builder2.getManifestDefinition();
+      expect(definition.ingredients).toBeDefined();
+      expect(definition.ingredients!.length).toBeGreaterThan(0);
+
+      // Sign again with the new builder
+      const dest2: DestinationBufferAsset = {
+        buffer: null,
+      };
+      builder2.sign(signer, source, dest2);
+
+      // Verify the ingredient is in the signed manifest
+      const reader2 = await Reader.fromAsset({
+        buffer: dest2.buffer! as Buffer,
+        mimeType: "image/jpeg",
+      });
+      expect(reader2).not.toBeNull();
+      const activeManifest = reader2!.getActive();
+      expect(activeManifest?.ingredients).toBeDefined();
+      expect(activeManifest?.ingredients?.length).toBe(1);
     });
   });
 });
